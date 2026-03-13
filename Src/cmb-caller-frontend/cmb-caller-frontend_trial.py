@@ -54,7 +54,7 @@ http://localhost:38000
 2025/07/07  Roy Ching    加入執行時僅保留一個 Instance 的功能.
 2025/07/07  Roy Ching    加入 12.取消取號 (Line使用者) "cancel_get_num".
 2025/07/07  Roy Ching    加入 13.取消取號 (網頁使用者) "web_cancel_get_num".
-2025/07/07  Roy Ching    加入 14.到號保留 (中央主動傳送) "reserve_number" 
+2025/07/07  Roy Ching    加入 14.到號保留 (中央主動傳送) "reserve_number"
 2025/07/08  Roy Ching    修正 handle_auth(...) 之 invalid literal for int() with base 10: '' 之錯誤.
 2025/07/09  Roy Ching    修正 add_connection(...) 之 invalid literal for int() with base 10: '' 之錯誤.
 2025/07/09  Roy Ching    修正 web_cancel_get_num 加入廣播至全部店家功能.
@@ -67,7 +67,7 @@ http://localhost:38000
 2025/07/29  Roy Ching    CSV login 改為不等待方式.
 2025/07/30  Roy Ching    部分 websocket.send 增加 try.
 2025/07/30  Roy Ching    LockWithNotification 改名 NotifyingLock
-2025/07/30  Roy Ching    ws_cmd_lock -> ws_device_lock 
+2025/07/30  Roy Ching    ws_cmd_lock -> ws_device_lock
 2025/07/30  Roy Ching    取消 TracedLock 全部改用 NotifyingLock
 2025/07/31  Roy Ching    取消 user_get_num 廣播對應至 new_get_num.
 2025/08/01  Roy Ching    get_num_switch' new_get_num' user_get_num 皆發送給訪客.
@@ -2314,7 +2314,7 @@ class CmbWebSocketClient:
                         #     action = json_data.get("action", "")
 
                         # if not caller_id and json_data['action'] != 'reset_caller':
-                        
+
                         # 如果 uuid 前面是 periodic_ 就 continue
                         msg_dict = json.loads(message) if isinstance(message, str) else message
                         if msg_dict.get("uuid", "").startswith("periodic_"):
@@ -4718,27 +4718,34 @@ def get_platform_config():
     global os_name
     """判斷 platform 並返回相應配置"""
     os_name = platform.system()
+
+    # --- 新增：環境變數強制覆蓋邏輯 ---
+    # 這裡會優先讀取 Docker 或 VM 傳進來的 FORCED_WS_URL
+    forced_url = os.environ.get("FORCED_WS_URL")
+    if forced_url:
+        # 如果有設定強制網址，則 Port 優先讀取環境變數 PORT，若無則預設 38000
+        port = int(os.environ.get("PORT", 38000))
+        logging.info(f"⚠️ 偵測到強制連線目標 (FORCED_WS_URL): {forced_url}, Port: {port}")
+        return port, forced_url, "FORCED_MODE"
+    # ------------------------------
+
     PORT = 8765
     if os_name == "Windows":
         PORT = 38000
-        # return PORT, "ws://localhost:8088", 'Windows'      # Local WIndows PC
         return (
             PORT,
             "wss://callnum-receiver-306511771181.asia-east1.run.app/",
             "Windows",
-        )  # CMB Trying
-        # return PORT, "wss://callnum-receiver-410240967190.asia-east1.run.app/", 'Windows'  # CMB Live
+        )
 
     if os_name == "Linux":
         if "K_SERVICE" in os.environ:  # Cloud RUN
-            # Cloud Run: 使用環境變數 PORT
             PORT = int(os.environ.get("PORT", 8080))
             return (
                 PORT,
                 "wss://callnum-receiver-306511771181.asia-east1.run.app/",
                 "Cloud_Run",
-            )  # CMB Trying
-            # return PORT, "wss://callnum-receiver-410240967190.asia-east1.run.app/", 'Cloud_Run'  # CMB Live
+            )
 
         try:
             response = requests.get(
@@ -4751,16 +4758,22 @@ def get_platform_config():
                     PORT,
                     "wss://callnum-receiver-306511771181.asia-east1.run.app/",
                     "Compute_Engine",
-                )  # CMB Trying
-                # return PORT, "wss://callnum-receiver-410240967190.asia-east1.run.app/", 'Compute_Engine'    # CMB Live
+                )
         except:
             pass
         return PORT, "ws://localhost:8088", "Linux"
     return PORT, "ws://localhost:8088", "Unknown"
 
 
+# --- [替代段落] --- 尋找 async def main(): 並替換前半段邏輯
 async def main():
     global frontend_server, ConnectionBlocker, start_timestamp, run_mode
+
+    # --- 新增：環境變數開關讀取 ---
+    disable_3rd_party = os.environ.get("DISABLE_3RD_PARTY", "false").lower() == "true"
+    forced_url = os.environ.get("FORCED_WS_URL")
+    # --------------------------
+
     """主程式入口"""
     try:
         logging.info(
@@ -4768,36 +4781,51 @@ async def main():
         )
 
         port, ws_url, platform_name = get_platform_config()
+
         if platform_name == "Cloud_Run":
-            # 啟動 Pub/Sub 訂閱（非阻塞）
-            sub_task = asyncio.create_task(delayed_subscribe())
+            # --- 修改：加入開關判定，避免在 VM 執行時因為找不到 Google 憑證而崩潰 ---
+            if not disable_3rd_party:
+                sub_task = asyncio.create_task(delayed_subscribe())
 
             CREDENTIALS, PROJECT_ID = default()
             print(f"CREDENTIALS: {CREDENTIALS}, Project ID: {PROJECT_ID}", flush=True)
+
             if PROJECT_ID == "callme-398802":  # CallMe Beta
-                ws_url = "wss://callnum-receiver-410240967190.asia-east1.run.app/"  # 強制設定至 CMB Live
+                # --- 新增：判斷是否需要強制覆蓋 ---
+                if not forced_url:
+                    ws_url = "wss://callnum-receiver-410240967190.asia-east1.run.app/"
                 run_mode = "Live"
                 ConnectionBlocker = False
                 logging.info("CMB Live Server!")
             else:
+                if not forced_url:
+                    ws_url = "wss://callnum-receiver-306511771181.asia-east1.run.app/"
                 run_mode = "Trial"
                 logging.info("CMB Trial Server!")
 
+        # --- 新增：最終保險，確保 ws_url 絕對打向你的 2.0 中心 ---
+        if forced_url:
+            ws_url = forced_url
+        # ---------------------------------------------------
+
         line_p_title = ""
-        if run_mode == "Local":  # local 不送 LineNotifier
-            # line_p_title = "PC_"
+        if run_mode == "Local":
             pass
-        else:
-            send_result = LineNotifier.send_event_message(
-                "event_1",
-                status=f"  ====== {line_p_title}{run_mode} Version! ======\n#{os.getenv('K_REVISION', 'local')},{start_timestamp}, cmb-caller-frontend Ver.{VER} 開始執行!",
-            )
+        # --- 修改：加入 LINE 開關判定 ---
+        elif not disable_3rd_party:
+            try:
+                send_result = LineNotifier.send_event_message(
+                    "event_1",
+                    status=f"  ====== {line_p_title}{run_mode} Version! ======\n#{os.getenv('K_REVISION', 'local')},{start_timestamp}, cmb-caller-frontend Ver.{VER} 開始執行!",
+                )
+            except Exception as e:
+                logging.warning(f"LINE 通知發送失敗 (已忽略): {e}")
 
         logging.info(
             f"platform: {platform_name}, port: {port}, WebSocket URL: {ws_url}"
         )
 
-        # 初始化並啟動 WebSocket Client, 連接至 CMB Main Server
+        # --- 後續初始化代碼保持不變 ---
         cmb_main_server_client = CmbWebSocketClient(ws_url)
         asyncio.create_task(cmb_main_server_client.run())
 
